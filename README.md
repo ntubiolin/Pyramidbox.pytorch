@@ -29,6 +29,16 @@ the gap is small with origin paper,I train 120k batch_size 4 which is different 
 2. modify data/config.py 
 3. ``` python prepare_wider_data.py```
 
+### Prepare data for  DarkFace
+1. Download DarkFace face dataset. 
+2. Modify _C.HOME in data/config.py
+Make sure you have 
+`df_wider_face_train_bbx_gt.txt`
+`df_wider_face_val_bbx_gt.txt`
+`df_wider_face_test_bbx_gt.txt`
+under your _C.HOME
+(You can copy these 3 file from cml5:/tmp3/biolin/cvprw_llfd/DarkFace_Train/df_wider_face_xxx_bbx_gt.txt)
+3. ``` python prepare_df_data.py```
 
 ### Train 
 ``` 
