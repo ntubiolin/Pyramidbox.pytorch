@@ -1,16 +1,16 @@
 #-*- coding:utf-8 -*-
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+
+
+
 
 import torch
 from PIL import Image, ImageDraw
 import torch.utils.data as data
 import numpy as np
 import random
+import cv2
 from utils.augmentations import preprocess
-
 
 class WIDERDetection(data.Dataset):
     """docstring for WIDERDetection"""
@@ -30,7 +30,7 @@ class WIDERDetection(data.Dataset):
             num_faces = int(line[1])
             box = []
             label = []
-            for i in xrange(num_faces):
+            for i in range(num_faces):
                 x = float(line[2 + 5 * i])
                 y = float(line[3 + 5 * i])
                 w = float(line[4 + 5 * i])
@@ -85,7 +85,7 @@ class WIDERDetection(data.Dataset):
             else:
                 index = random.randrange(0, self.num_samples)
 
-        
+
         #img = Image.fromarray(img)
         '''
         draw = ImageDraw.Draw(img)
@@ -96,8 +96,18 @@ class WIDERDetection(data.Dataset):
             draw.rectangle(bbox,outline='red')
         img.save('image.jpg')
         '''
+        # XXX: For small GPU
+        # print(img.dtype)
+        # print(img.shape)
+        img = img.swapaxes(0,1).swapaxes(1,2)
+        # print(img.shape)
+        img = cv2.resize(img, (0,0), fx=0.05, fy=0.05)
+        img = img.swapaxes(1,2).swapaxes(0,1)
+        # img = Image.fromarray(img)
+        # img = img.resize((320,320))
+        # img = np.array(img)
         return torch.from_numpy(img), face_target, head_target
-        
+
 
     def annotransform(self, boxes, im_width, im_height):
         boxes[:, 0] /= im_width
@@ -151,7 +161,7 @@ def detection_collate(batch):
         head_targets.append(torch.FloatTensor(sample[2]))
     return torch.stack(imgs, 0), face_targets,head_targets
 
-    
+
 
 if __name__ == '__main__':
     from config import cfg

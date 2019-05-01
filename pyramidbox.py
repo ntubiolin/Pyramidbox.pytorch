@@ -15,8 +15,10 @@ import os
 from layers import *
 from data.config import cfg
 import numpy as np
-
-
+from collections import OrderedDict
+class Flatten(nn.Module):
+    def forward(self, input):
+        return input.view(input.size(0), -1)
 class conv_bn(nn.Module):
     """docstring for conv"""
 
@@ -71,48 +73,92 @@ class CPM(nn.Module):
         return ssh_out
 
 
-class PyramidBox(nn.Module):
-    """docstring for PyramidBox"""
+class GradReverse(Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
 
-    def __init__(self,
-                 phase,
-                 base,
-                 extras,
-                 lfpn_cpm,
-                 head,
-                 num_classes):
-        super(PyramidBox, self).__init__()
-        #self.use_transposed_conv2d = use_transposed_conv2d
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg()
 
-        self.vgg = nn.ModuleList(base)
-        self.extras = nn.ModuleList(extras)
 
-        self.L2Norm3_3 = L2Norm(256, 10)
-        self.L2Norm4_3 = L2Norm(512, 8)
-        self.L2Norm5_3 = L2Norm(512, 5)
-        
-        self.lfpn_topdown = nn.ModuleList(lfpn_cpm[0])
-        self.lfpn_later = nn.ModuleList(lfpn_cpm[1])
-        self.cpm = nn.ModuleList(lfpn_cpm[2])
+def grad_reverse(x):
+    return GradReverse.apply(x)
 
-        self.loc_layers = nn.ModuleList(head[0])
-        self.conf_layers = nn.ModuleList(head[1])
 
-        
+class DomainClassifier(nn.Module):
+    """docstring for conv"""
 
-        self.is_infer = False
-        if phase == 'test':
-            self.softmax = nn.Softmax(dim=-1)
-            self.detect = Detect(cfg)
-            self.is_infer = True
+    def __init__(self):
+        super(DomainClassifier, self).__init__()
+        self.classfier = nn.Sequential(
+            # XXX
+            nn.Linear(1024 * 1* 1, 128),  # 20*20 depends on the image size
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+                )
+    def forward(self, x):
+        x = grad_reverse(x)
+        # print(x.size())
+        x = x.view(x.size(0), -1)
+        return self.classfier(x)
 
-    def _upsample_prod(self, x, y):
-        _, _, H, W = y.size()
-        return F.upsample(x, size=(H, W), mode='bilinear') * y
+
+class PyramidBoxDSN(nn.Module):
+    def __init__(self, phase, base, extras, lfpn_cpm, head, num_classes, vgg_decode):
+        super(PyramidBoxDSN, self).__init__()
+        self.encoder_target = PyramidBoxVGG(base)
+        self.encoder_shared = PyramidBoxVGG(base)
+        self.domain_classifier = DomainClassifier()
+        self.encoder_source = PyramidBoxVGG(base)
+        self.detector = PyramidBoxDetection(
+                phase, extras, lfpn_cpm, head, num_classes)
+        self.decoder = PyramidBoxVGG_decoder(vgg_decode)
+
+    def forward(self, img_t, img_s):
+        h_t, _, _, _, _, _ = self.encoder_target(img_t)
+        h_t_share, _, _, _, _, _ = self.encoder_shared(img_t)
+        h_s_share, _, _, _, _, _ = self.encoder_shared(img_s)
+        h_s, conv3_3, conv4_3, conv5_3, convfc_7, size =\
+            self.encoder_source(img_s)
+        output_detect = \
+            self.detector(h_s, conv3_3, conv4_3, conv5_3, convfc_7, size)
+        img_t_recon = self.decoder(0.5*(h_t + h_t_share))
+        img_s_recon = self.decoder(0.5*(h_s + h_s_share))
+
+        domain_predict_t = self.domain_classifier(h_t_share)
+        domain_predict_s = self.domain_classifier(h_s_share)
+
+        return output_detect, img_t_recon, img_s_recon,\
+            h_t, h_t_share, h_s, h_s_share, domain_predict_t, domain_predict_s
+
+
+class PyramidBoxVGG_decoder(nn.Module):
+    def __init__(self, base):
+        super(PyramidBoxVGG_decoder, self).__init__()
+        self.vgg_decoder = nn.Sequential(*base)
 
     def forward(self, x):
-        size = x.size()[2:]
+        # print('>>> In forward L104')
+        # x1 = x
+        # print(x1.size())
+        # for i, layer in enumerate(self.vgg_decoder):
+        #     print(layer)
+        #     x1 = layer(x1)
+        #     print(x1.size())
+        x = self.vgg_decoder(x)
+        return x
 
+
+class PyramidBoxVGG(nn.Module):
+    def __init__(self, base):
+        super(PyramidBoxVGG, self).__init__()
+        self.vgg = nn.ModuleList(base)
+    def forward(self, x):
+        size = x.size()[2:]
         # apply vgg up to conv3_3 relu
         for k in range(16):
             x = self.vgg[k](x)
@@ -129,7 +175,54 @@ class PyramidBox(nn.Module):
         for k in range(30, len(self.vgg)):
             x = self.vgg[k](x)
         convfc_7 = x
+        return x, conv3_3, conv4_3, conv5_3, convfc_7, size
 
+
+
+class PyramidBoxDetection(nn.Module):
+    """docstring for PyramidBoxDetection"""
+
+    def __init__(self,
+                 phase,
+                 # base,
+                 extras,
+                 lfpn_cpm,
+                 head,
+                 num_classes):
+        super(PyramidBoxDetection, self).__init__()
+        #self.use_transposed_conv2d = use_transposed_conv2d
+
+        # self.vgg = nn.ModuleList(base)
+        # self.vgg = PyramidBoxVGG(base)
+        self.extras = nn.ModuleList(extras)
+
+        self.L2Norm3_3 = L2Norm(256, 10)
+        self.L2Norm4_3 = L2Norm(512, 8)
+        self.L2Norm5_3 = L2Norm(512, 5)
+
+        self.lfpn_topdown = nn.ModuleList(lfpn_cpm[0])
+        self.lfpn_later = nn.ModuleList(lfpn_cpm[1])
+        self.cpm = nn.ModuleList(lfpn_cpm[2])
+
+        self.loc_layers = nn.ModuleList(head[0])
+        self.conf_layers = nn.ModuleList(head[1])
+
+
+
+        self.is_infer = False
+        if phase == 'test':
+            self.softmax = nn.Softmax(dim=-1)
+            self.detect = Detect(cfg)
+            self.is_infer = True
+
+    def _upsample_prod(self, x, y):
+        _, _, H, W = y.size()
+        return F.upsample(x, size=(H, W), mode='bilinear') * y
+
+    # def forward(self, x):
+    def forward(self, x, conv3_3, conv4_3, conv5_3, convfc_7, size):
+        # size = x.size()[2:]
+        # x, conv3_3, conv4_3, conv5_3, convfc_7 = self.vgg(x)
         # apply extra layers and cache source layer outputs
         for k in range(2):
             x = F.relu(self.extras[k](x), inplace=True)
@@ -296,6 +389,44 @@ lfpn_cpm_cfg = [256, 512, 512, 1024, 512, 256]
 multibox_cfg = [512, 512, 512, 512, 512, 512]
 
 
+def vgg_decode(cfg, ch, batch_norm=False):
+    cfg = list(reversed(cfg))
+    layers = []
+    # in_channels = i
+
+    deconv7 = nn.ConvTranspose2d(1024, 1024, kernel_size=1, stride=1)
+    # XXX padding=6? dilation=6? Transpose means?
+    deconv6 = nn.ConvTranspose2d(1024, 512, kernel_size=3, padding=6, dilation=6)
+    # conv6 = nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6)
+    # conv7 = nn.Conv2d(1024, 1024, kernel_size=1)
+
+    layers += [deconv7, nn.ReLU(inplace=True), deconv6, nn.ReLU(inplace=True)]
+    # layers += [conv6,
+               # nn.ReLU(inplace=True), conv7, nn.ReLU(inplace=True)]
+
+    for i, v in enumerate(cfg):
+        if v == 'M':
+            layers += [nn.Upsample(scale_factor=2)]
+            # layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        elif v == 'C':
+            #XXX ignore celing mode??
+            layers += [nn.Upsample(scale_factor=2)]
+            # layers += [nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)]
+        else:
+            in_channels = v
+            if i + 1 == len(cfg):
+                out_channels = ch
+            else:
+                out_channels = cfg[i+1] if isinstance(cfg[i+1], int) else cfg[i+2]
+            deconv2d = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, padding=1)
+            # conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [deconv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [deconv2d, nn.ReLU(inplace=True)]
+            # in_channels = v
+        if i + 1 == len(cfg): layers.pop()
+    return layers
 def vgg(cfg, i, batch_norm=False):
     layers = []
     in_channels = i
@@ -379,14 +510,21 @@ def multibox(vgg, extra_layers):
 
 
 def build_net(phase, num_classes=2):
+    # base refers to vgg
     base_, extras_, head_ = multibox(
         vgg(vgg_cfg, 3), add_extras((extras_cfg), 1024))
     lfpn_cpm = add_lfpn_cpm(lfpn_cpm_cfg)
-    return PyramidBox(phase, base_, extras_, lfpn_cpm, head_, num_classes)
-
+    # return PyramidBoxDetection(phase, base_, extras_, lfpn_cpm, head_, num_classes)
+    return PyramidBoxDSN(phase, base_, extras_, lfpn_cpm, head_, num_classes, vgg_decode(vgg_cfg, 3))
 
 if __name__ == '__main__':
-    inputs = Variable(torch.randn(1, 3, 640, 640))
+    inputs_t = Variable(torch.randn(1, 3, 640, 640))
+    inputs_s = Variable(torch.randn(1, 3, 640, 640))
     net = build_net('train', num_classes=2)
     print(net)
-    out = net(inputs)
+    out = net(inputs_t, inputs_s)
+    output_detect, \
+        img_t_recon, img_s_recon, h_t, h_t_share, h_s, h_s_share = out
+    print(img_t_recon.size())
+    print(img_s_recon.size())
+    print(h_t.size())

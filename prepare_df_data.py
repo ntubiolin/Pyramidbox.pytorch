@@ -1,25 +1,34 @@
 #-*- coding:utf-8 -*-
 
-
-
-
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
 
 
 import os
 from data.config import cfg
 import cv2
 
-WIDER_ROOT = os.path.join(cfg.HOME, 'WIDER')
-train_list_file = os.path.join(WIDER_ROOT, 'wider_face_split',
-                               'wider_face_train_bbx_gt.txt')
-val_list_file = os.path.join(WIDER_ROOT, 'wider_face_split',
-                             'wider_face_val_bbx_gt.txt')
+#WIDER_ROOT = os.path.join(cfg.HOME, 'WIDER')
+# train_list_file = os.path.join(WIDER_ROOT, 'wider_face_split',
+#                                'wider_face_train_bbx_gt.txt')
+# val_list_file = os.path.join(WIDER_ROOT, 'wider_face_split',
+#                              'wider_face_val_bbx_gt.txt')
+#
+# WIDER_TRAIN = os.path.join(WIDER_ROOT, 'WIDER_train', 'images')
+# WIDER_VAL = os.path.join(WIDER_ROOT, 'WIDER_val', 'images')
 
-WIDER_TRAIN = os.path.join(WIDER_ROOT, 'WIDER_train', 'images')
-WIDER_VAL = os.path.join(WIDER_ROOT, 'WIDER_val', 'images')
+
+DARKFACE_ROOT = os.path.join(cfg.HOME, 'DarkFace_Train')
+train_list_file = os.path.join(DARKFACE_ROOT, 'df_wider_face_train_bbx_gt.txt')
+val_list_file = os.path.join(DARKFACE_ROOT, 'df_wider_face_val_bbx_gt.txt')
+
+DARKFACE_TRAIN = os.path.join(DARKFACE_ROOT, 'images')
+DARKFACE_VAL = os.path.join(DARKFACE_ROOT, 'images')
 
 
-def parse_wider_file(root, file):
+# def parse_wider_file(root, file):
+def parse_df_file(root, file):
     with open(file, 'r') as fr:
         lines = fr.readlines()
     face_count = []
@@ -33,13 +42,19 @@ def parse_wider_file(root, file):
         if count > 0:
             line = line.split(' ')
             count -= 1
-            loc = [int(line[0]), int(line[1]), int(line[2]), int(line[3])]
+            # loc = [int(line[0]), int(line[1]), int(line[2]), int(line[3])]
+            x =  int(line[0])
+            y =  int(line[1])
+            w =  int(line[2]) - int(line[0])
+            h =  int(line[3]) - int(line[1])
+            loc = [x, y, w, h]
             face_loc += [loc]
         if flag:
             face_count += [int(line)]
             flag = False
             count = int(line)
-        if 'jpg' in line:
+        if 'png' in line:
+            # if 'jpg' in line:
             img_paths += [os.path.join(root, line)]
             flag = True
 
@@ -53,9 +68,9 @@ def parse_wider_file(root, file):
     return img_paths, img_faces
 
 
-def wider_data_file():
-    img_paths, bbox = parse_wider_file(WIDER_TRAIN, train_list_file)
-    fw = open(cfg.FACE.TRAIN_FILE, 'w')
+def df_data_file():
+    img_paths, bbox = parse_df_file(DARKFACE_TRAIN, train_list_file)
+    fw = open(cfg.FACE.TRAIN_FILE_T, 'w')
     for index in range(len(img_paths)):
         path = img_paths[index]
         boxes = bbox[index]
@@ -67,8 +82,8 @@ def wider_data_file():
         fw.write('\n')
     fw.close()
 
-    img_paths, bbox = parse_wider_file(WIDER_VAL, val_list_file)
-    fw = open(cfg.FACE.VAL_FILE, 'w')
+    img_paths, bbox = parse_df_file(DARKFACE_VAL, val_list_file)
+    fw = open(cfg.FACE.VAL_FILE_T, 'w')
     for index in range(len(img_paths)):
         path = img_paths[index]
         boxes = bbox[index]
@@ -82,4 +97,4 @@ def wider_data_file():
 
 
 if __name__ == '__main__':
-    wider_data_file()
+    df_data_file()

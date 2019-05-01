@@ -13,55 +13,15 @@ import torch.utils.data as data
 import os
 import time
 import torch
-import argparse
 
 import numpy as np
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 
-from data.config import cfg
+from data.config import cfg, args
 from pyramidbox import build_net
-from layers.modules import MultiBoxLoss
-from data.widerface import WIDERDetection, detection_collate
-
-
-parser = argparse.ArgumentParser(
-    description='Pyramidbox face Detector Training With Pytorch')
-train_set = parser.add_mutually_exclusive_group()
-parser.add_argument('--basenet',
-                    default='vgg16_reducedfc.pth',
-                    help='Pretrained base model')
-parser.add_argument('--batch_size',
-                    default=16, type=int,
-                    help='Batch size for training')
-parser.add_argument('--resume',
-                    default=None, type=str,
-                    help='Checkpoint state_dict file to resume training from')
-parser.add_argument('--num_workers',
-                    default=4, type=int,
-                    help='Number of workers used in dataloading')
-parser.add_argument('--cuda',
-                    default=True, type=bool,
-                    help='Use CUDA to train model')
-parser.add_argument('--lr', '--learning-rate',
-                    default=1e-3, type=float,
-                    help='initial learning rate')
-parser.add_argument('--momentum',
-                    default=0.9, type=float,
-                    help='Momentum value for optim')
-parser.add_argument('--weight_decay',
-                    default=5e-4, type=float,
-                    help='Weight decay for SGD')
-parser.add_argument('--gamma',
-                    default=0.1, type=float,
-                    help='Gamma update for SGD')
-parser.add_argument('--multigpu',
-                    default=False, type=bool,
-                    help='Use mutil Gpu training')
-parser.add_argument('--save_folder',
-                    default='weights/',
-                    help='Directory for saving checkpoint models')
-args = parser.parse_args()
+from data.dataset import DSNDataset, detection_collate
+from DSNLoss import DSNLoss
 
 if not args.multigpu:
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -80,7 +40,7 @@ else:
 if not os.path.exists(args.save_folder):
     os.makedirs(args.save_folder)
 
-train_dataset = WIDERDetection(cfg.FACE.TRAIN_FILE, mode='train')
+train_dataset = DSNDataset(cfg.FACE.TRAIN_FILE_S, cfg.FACE.TRAIN_FILE_T, mode='train')
 
 train_loader = data.DataLoader(train_dataset, args.batch_size,
                                num_workers=args.num_workers,
@@ -88,7 +48,7 @@ train_loader = data.DataLoader(train_dataset, args.batch_size,
                                collate_fn=detection_collate,
                                pin_memory=True)
 
-val_dataset = WIDERDetection(cfg.FACE.VAL_FILE, mode='val')
+val_dataset = DSNDataset(cfg.FACE.VAL_FILE_S, cfg.FACE.VAL_FILE_T, mode='val')
 val_batchsize = args.batch_size // 2
 val_loader = data.DataLoader(val_dataset, val_batchsize,
                              num_workers=args.num_workers,
@@ -97,7 +57,7 @@ val_loader = data.DataLoader(val_dataset, val_batchsize,
                              pin_memory=True)
 
 min_loss = np.inf
-
+criterion = DSNLoss()
 
 def train():
     iteration = 0
@@ -112,9 +72,11 @@ def train():
         start_epoch = net.load_weights(args.resume)
         iteration = start_epoch * per_epoch_size
     else:
-        vgg_weights = torch.load(args.save_folder + args.basenet)
+        # vgg_weights = torch.load(args.save_folder + args.basenet)
         print('Load base network....')
-        net.vgg.load_state_dict(vgg_weights)
+        # XXX: rename the keys
+        # net.vgg.load_state_dict(vgg_weights, strict=False)
+        # net.load_state_dict(vgg_weights, strict=False)
 
     if args.cuda:
         if args.multigpu:
@@ -123,19 +85,25 @@ def train():
         cudnn.benckmark = True
 
     if not args.resume:
+        def print_model(model):
+            for param in model.parameters():
+                print(param.data)
+        def weights_init(m):
+            if isinstance(m, nn.Conv2d):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
         print('Initializing weights...')
-        pyramidbox.extras.apply(pyramidbox.weights_init)
-        pyramidbox.lfpn_topdown.apply(pyramidbox.weights_init)
-        pyramidbox.lfpn_later.apply(pyramidbox.weights_init)
-        pyramidbox.cpm.apply(pyramidbox.weights_init)
-        pyramidbox.loc_layers.apply(pyramidbox.weights_init)
-        pyramidbox.conf_layers.apply(pyramidbox.weights_init)
+        net.apply(weights_init)
+        # pyramidbox.extras.apply(pyramidbox.weights_init)
+        # pyramidbox.lfpn_topdown.apply(pyramidbox.weights_init)
+        # pyramidbox.lfpn_later.apply(pyramidbox.weights_init)
+        # pyramidbox.cpm.apply(pyramidbox.weights_init)
+        # pyramidbox.loc_layers.apply(pyramidbox.weights_init)
+        # pyramidbox.conf_layers.apply(pyramidbox.weights_init)
 
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
-    criterion1 = MultiBoxLoss(cfg, args.cuda)
-    criterion2 = MultiBoxLoss(cfg, args.cuda, use_head_loss=True)
     print('Loading wider dataset...')
     print('Using the specified args:')
     print(args)
@@ -147,31 +115,53 @@ def train():
     net.train()
     for epoch in range(start_epoch, cfg.EPOCHES):
         losses = 0
-        for batch_idx, (images, face_targets, head_targets) in enumerate(train_loader):
+        for batch_idx, (imgs_s, face_targets_s, head_targets_s,
+                imgs_t, face_targets_t, head_targets_t) in enumerate(train_loader):
             if args.cuda:
-                images = Variable(images.cuda())
-                face_targets = [Variable(ann.cuda(), volatile=True)
-                                for ann in face_targets]
-                head_targets = [Variable(ann.cuda(), volatile=True)
-                                for ann in head_targets]
+                imgs_s = Variable(imgs_s.cuda())
+                imgs_t = Variable(imgs_t.cuda())
+                face_targets_s = [Variable(ann.cuda(), volatile=True)
+                                for ann in face_targets_s]
+                head_targets_s = [Variable(ann.cuda(), volatile=True)
+                                for ann in head_targets_s]
+                face_targets_t = [Variable(ann.cuda(), volatile=True)
+                                for ann in face_targets_t]
+                head_targets_t = [Variable(ann.cuda(), volatile=True)
+                                for ann in head_targets_t]
             else:
-                images = Variable(images)
-                face_targets = [Variable(ann, volatile=True)
-                                for ann in face_targets]
-                head_targets = [Variable(ann, volatile=True)
-                                for ann in head_targets]
+                imgs_s = Variable(imgs_s)
+                imgs_t = Variable(imgs_t)
+                face_targets_s = [Variable(ann, volatile=True)
+                                for ann in face_targets_s]
+                head_targets_s = [Variable(ann, volatile=True)
+                                for ann in head_targets_s]
+                face_targets_t = [Variable(ann, volatile=True)
+                                for ann in face_targets_t]
+                head_targets_t = [Variable(ann, volatile=True)
+                                for ann in head_targets_t]
 
             if iteration in cfg.LR_STEPS:
                 step_index += 1
                 adjust_learning_rate(optimizer, args.gamma, step_index)
 
             t0 = time.time()
-            out = net(images)
+            # TODO
+            # imgs_t = images
+            # imgs_s = images
+            out = net(imgs_t, imgs_s)
+            output_detect, imgs_t_recon, imgs_s_recon, \
+                h_t, h_t_share, h_s, h_s_share, \
+                domain_predict_t, domain_predict_s = out
             # backprop
             optimizer.zero_grad()
-            face_loss_l, face_loss_c = criterion1(out, face_targets)
-            head_loss_l, head_loss_c = criterion2(out, head_targets)
-            loss = face_loss_l + face_loss_c + head_loss_l + head_loss_c
+            # TODO import DSNLoss
+            loss, face_loss_l, face_loss_c, head_loss_l, head_loss_c =\
+                criterion(
+                    output_detect, face_targets_s, head_targets_s,
+                    imgs_t, imgs_s, imgs_t_recon, imgs_s_recon,
+                    h_t, h_s, h_t_share, h_s_share,
+                    domain_predict_t, domain_predict_s
+                    )
             losses += loss.data[0]
             loss.backward()
             optimizer.step()
@@ -195,36 +185,61 @@ def train():
                            os.path.join(args.save_folder, file))
             iteration += 1
 
-        val(epoch, net, pyramidbox, criterion1, criterion2)
+        val(epoch, net, pyramidbox)
 
 
 def val(epoch,
         net,
-        pyramidbox,
-        criterion1,
-        criterion2):
+        pyramidbox
+        ):
+    print(">>> In val:")
     net.eval()
     face_losses = 0
     head_losses = 0
     step = 0
     t1 = time.time()
-    for batch_idx, (images, face_targets, head_targets) in enumerate(val_loader):
+    for batch_idx, (imgs_s, face_targets_s, head_targets_s,
+                    imgs_t, face_targets_t, head_targets_t) \
+            in enumerate(val_loader):
         if args.cuda:
-            images = Variable(images.cuda())
-            face_targets = [Variable(ann.cuda(), volatile=True)
-                            for ann in face_targets]
-            head_targets = [Variable(ann.cuda(), volatile=True)
-                            for ann in head_targets]
+            imgs_s = Variable(imgs_s.cuda())
+            imgs_t = Variable(imgs_t.cuda())
+            face_targets_s = [Variable(ann.cuda(), volatile=True)
+                            for ann in face_targets_s]
+            head_targets_s = [Variable(ann.cuda(), volatile=True)
+                            for ann in head_targets_s]
+            face_targets_t = [Variable(ann.cuda(), volatile=True)
+                            for ann in face_targets_t]
+            head_targets_t = [Variable(ann.cuda(), volatile=True)
+                            for ann in head_targets_t]
         else:
-            images = Variable(images)
-            face_targets = [Variable(ann, volatile=True)
-                            for ann in face_targets]
-            head_targets = [Variable(ann, volatile=True)
-                            for ann in head_targets]
+            imgs_s = Variable(imgs_s)
+            imgs_t = Variable(imgs_t)
+            face_targets_s = [Variable(ann, volatile=True)
+                            for ann in face_targets_s]
+            head_targets_s = [Variable(ann, volatile=True)
+                            for ann in head_targets_s]
+            face_targets_t = [Variable(ann, volatile=True)
+                            for ann in face_targets_t]
+            head_targets_t = [Variable(ann, volatile=True)
+                            for ann in head_targets_t]
 
-        out = net(images)
-        face_loss_l, face_loss_c = criterion1(out, face_targets)
-        head_loss_l, head_loss_c = criterion2(out, head_targets)
+        # out = net(imgs_s)
+        # face_loss_l, face_loss_c = criterion1(out, face_targets_s)
+        # head_loss_l, head_loss_c = criterion2(out, head_targets_s)
+
+        out = net(imgs_t, imgs_s)
+        output_detect, imgs_t_recon, imgs_s_recon, \
+            h_t, h_t_share, h_s, h_s_share, \
+            domain_predict_t, domain_predict_s = out
+        # TODO import DSNLoss
+        loss, face_loss_l, face_loss_c, head_loss_l, head_loss_c =\
+            criterion(
+                output_detect, face_targets_s, head_targets_s,
+                imgs_t, imgs_s, imgs_t_recon, imgs_s_recon,
+                h_t, h_s, h_t_share, h_s_share,
+                domain_predict_t, domain_predict_s
+                )
 
         face_losses += (face_loss_l + face_loss_c).data[0]
         head_losses += (head_loss_l + head_loss_c).data[0]
